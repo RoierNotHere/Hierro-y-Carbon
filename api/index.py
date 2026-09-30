@@ -1,116 +1,73 @@
-import requests
-import json
-import time
-import random
 from http.server import BaseHTTPRequestHandler
 import cloudscraper
 from bs4 import BeautifulSoup
-
-# Cache para proteger tu IP y ahorrar peticiones
-cache_investing = {"hierro": None, "carbon": None, "timestamp": 0}
+import json
 
 class handler(BaseHTTPRequestHandler):
-
-    def obtener_precio(self, url):
-        # 1. Configuramos el scraper con un delay más alto para Cloudflare
-        scraper = cloudscraper.create_scraper(
-            delay=20, 
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
+    def do_GET(self):
+        # Mapeo de minerales (Hierro y Carbón) con símbolos en Trading Economics
+        minerales_target = {
+            'SCO1:COM': 'Hierro',
+            'COAL:COM': 'Carbón'
+        }
+        resultados = {}
         
         try:
-            # 2. Headers de "Navegador de Confianza" (Mantenidos tal cual pediste)
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Referer': 'https://www.google.com/',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1',
-                'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'Cookie': 'edition_redirect=1; gtm_id=GTM-PG97WS; _ga=GA1.2.123456789.123456789;'
-            }
+            scraper = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'desktop': True
+                }
+            )
             
-            # --- SLEEP HUMANO ---
-            pausa = random.uniform(5.5, 10.2)
-            print(f"Iniciando pausa de {pausa:.2f}s...")
-            time.sleep(pausa)
-            
-            res = scraper.get(url, headers=headers, timeout=40)
+            url = "https://tradingeconomics.com/commodities"
+            res = scraper.get(url, timeout=10)
             
             if res.status_code == 200:
-                soup = BeautifulSoup(res.text, "html.parser")
-                tag = soup.find("div", {"data-test": "instrument-price-last"}) or \
-                      soup.select_one('span[data-test="instrument-price-last"]') or \
-                      soup.find("span", {"id": "last_last"})
+                soup = BeautifulSoup(res.text, 'html.parser')
                 
-                if tag:
-                    # Lógica para evitar que el valor se multiplique:
-                    valor_raw = tag.get_text(strip=True)
-                    
-                    # Eliminamos el punto de miles y cambiamos la coma por punto decimal
-                    # Ejemplo: "10.710,00" -> "10710.00" o "107,10" -> "107.10"
-                    valor_limpio = valor_raw.replace('.', '').replace(',', '.')
-                    
+                # Búsqueda por símbolo exacto
+                for symbol, nombre in minerales_target.items():
                     try:
-                        # Convertimos a número real para limpiar cualquier residuo
-                        valor_final = "{:.2f}".format(float(valor_limpio))
-                        print(f"VALOR DETECTADO: {valor_final}")
-                        return valor_final
-                    except:
-                        return valor_limpio
-                return "Tag_No_Encontrado"
-            
-            print(f"BLOQUEO: Status {res.status_code}")
-            return f"Error_{res.status_code}"
-            
-        except Exception as e:
-            return f"Error_Excepcion"
+                        fila = soup.find('tr', {'data-symbol': symbol})
+                        
+                        # Si no encuentra el símbolo directo de Carbón, busca por nombre de enlace en el HTML
+                        if not fila and nombre == 'Carbón':
+                            fila = soup.find('a', href=lambda h: h and '/commodity/coal' in h)
+                            if fila:
+                                fila = fila.find_parent('tr')
 
-    def do_GET(self):
-        global cache_investing
-        
-        hierro_url = "https://es.investing.com/commodities/iron-ore-62-cfr-futures"
-        carbon_url = "https://es.investing.com/commodities/rotterdam-coal-futures"
-        
-        ahora = time.time()
-        TIEMPO_CACHE = 7200 # 2 horas
+                        if not fila and nombre == 'Hierro':
+                            fila = soup.find('a', href=lambda h: h and '/commodity/iron-ore' in h)
+                            if fila:
+                                fila = fila.find_parent('tr')
 
-        if cache_investing["hierro"] and (ahora - cache_investing["timestamp"] < TIEMPO_CACHE):
-            h_val = cache_investing["hierro"]
-            c_val = cache_investing["carbon"]
-            fuente = "Caché"
-        else:
-            h_val = self.obtener_precio(hierro_url)
-            time.sleep(random.uniform(4, 7))
-            c_val = self.obtener_precio(carbon_url)
-            
-            if "Error" not in h_val and "Error" not in c_val:
-                cache_investing["hierro"] = h_val
-                cache_investing["carbon"] = c_val
-                cache_investing["timestamp"] = ahora
-                fuente = "Investing Actualizado"
+                        if fila:
+                            precio_raw = fila.find('td', id='p')
+                            resultados[nombre] = precio_raw.text.strip() if precio_raw else "N/A"
+                        else:
+                            resultados[nombre] = "No encontrado"
+                    except Exception:
+                        resultados[nombre] = "Error al procesar"
+                
+                payload = {
+                    "datos": resultados,
+                    "status": "success"
+                }
+                status_code = 200
             else:
-                fuente = "Error de Conexión / Bloqueo"
+                payload = {"error": f"Error del sitio origen: {res.status_code}"}
+                status_code = 502
 
-        datos = {
-            "hierro": h_val,
-            "carbon": c_val,
-            "fuente": fuente,
-            "status": "online" if "Error" not in h_val else "blocked"
-        }
+        except Exception as e:
+            payload = {"error": str(e)}
+            status_code = 500
 
-        self.send_response(200)
+        # Respuesta JSON para Vercel
+        self.send_response(status_code)
         self.send_header('Content-type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(json.dumps(datos).encode('utf-8'))
+        self.wfile.write(json.dumps(payload).encode('utf-8'))
+        return
